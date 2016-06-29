@@ -1,13 +1,10 @@
 package jpatch
 
 import (
-	"strconv"
+	"fmt"
 	"strings"
 
-	"gitlab.com/delvecore/api/validator"
-	"gitlab.com/paasapi/api/apierr"
-	"gitlab.com/paasapi/api/db"
-	"gitlab.com/paasapi/api/util"
+	"github.com/sethjback/jpatch/jpatcherror"
 )
 
 const (
@@ -33,10 +30,12 @@ type Patch struct {
 	Path string `json:"path"`
 	// Value is the new data to set at the path.
 	Value interface{} `json:"value,omitempty"`
+	// From is the path to move or copy
+	From string `json:"from,omitempty"`
 }
 
 // PathSegment defines an appropriate object path segment
-// PathSegments are a way for an object to tell jpatch what constitutes a valie path within the object.
+// PathSegments are a way for an object to tell jpatch what constitutes a valid path within the object.
 // Each segment must contain all the possible branches which can be followed from it
 //
 // Values represent all the possible valid values for the path segement (unless the segment is a wildcard)
@@ -46,7 +45,7 @@ type Patch struct {
 type PathSegment struct {
 	// Optional signals whether this segment is required
 	Optional bool
-	// Wildcard signals wether any value should be accepted
+	// Wildcard signals whether any value should be accepted
 	Wildcard bool
 	// Values has two purposes:
 	// 1. it defines acceptable values for this segement
@@ -69,99 +68,104 @@ type Patchable interface {
 	// All potential patch operations are validatd against this definition
 	GetJPatchRootSegment() *PathSegment
 	// TranslateValue gives Patchable a chance to validate and modify the value in any way before passing it to the datastore
-	ValidateJPatchPatches([]Patch) ([]Patch, error)
+	ValidateJPatchPatches([]Patch) ([]Patch, []error)
 }
 
-// TranslatePatches takes a slice of patches and generates the update expression using the patchable passed in
-func TranslatePatches(patches []Patch, pable Patchable) (map[string]db.UpdateValue, apierr.Error) {
-	valMap := map[string]db.UpdateValue{}
-	var errs []apierr.Error
-	for _, p := range patches {
-		if p.Op != Add && p.Op != Remove && p.Op != Replace {
-			return nil, apierr.New("Invalid operation", ErrorInvalidOperation, nil, "Supported operations are \"add\" and \"remove\"")
-		}
-		path, err := translatePath(p, pable)
-		if err != nil {
-			return nil, err
-		}
+// ProcessPatches process patch objects
+func ProcessPatches(patches []Patch, pable Patchable) ([]Patch, []error) {
 
-		val, err := pable.ValidatePatchValue(path, p.Op, p.Value)
+	var errs []error
+	rootSegment := pable.GetJPatchRootSegment()
+
+	for _, p := range patches {
+		err := validatePatch(p)
 		if err != nil {
 			errs = append(errs, err)
-		} else {
-			uv := db.UpdateValue{Value: val}
+			continue
+		}
 
-			switch p.Op {
-			case Add:
-				uv.Action = db.Put
-			case Replace:
-				uv.Action = db.Update
-			case Remove:
-				uv.Action = db.Delete
+		err = validatePath(p.Path, p.Op, rootSegment)
+		if err != nil {
+			errs = append(errs, err)
+		}
+
+		if p.From != "" {
+			err = validateFrom(p.From, p.Op, rootSegment)
+			if err != nil {
+				errs = append(errs, err)
 			}
-
-			valMap[path] = uv
 		}
 	}
 
 	if len(errs) != 0 {
-		return nil, apierr.New("Patch value invalid", validator.ErrorValidation, nil, errs)
+		return nil, errs
 	}
-	return valMap, nil
+
+	return pable.ValidateJPatchPatches(patches)
 }
 
-func translatePath(p Patch, patch Patchable) (string, apierr.Error) {
-	split := strings.Split(p.Path, "/")
-	splitLength := len(split)
-	if splitLength < 2 || (split[0] == "" && split[1] == "") {
-		return "", apierr.New("Empty Paths Not Supported", ErrorEmptyPath, nil, nil)
+func validatePath(path, op string, root *PathSegment) error {
+	final, err := traceObjectPathString(path, root)
+	if err != nil {
+		return err
 	}
 
-	// get rid of the leading ""
-	split = split[1:]
-	splitLength = len(split)
+	// Check for valid operations on "-"
+	if final == "-" && (op == Remove || op == Test || op == Replace) {
+		return jpatcherror.New("Invalid Operation", jpatcherror.ErrorInvalidOperation, "cannot "+op+" array index of '-'", nil)
+	}
 
-	currentSegment := patch.GetRootSegment()
-	translatedPath := ""
-	finalSeg := ""
+	return nil
+}
+
+func validateFrom(path, op string, root *PathSegment) error {
+	final, err := traceObjectPathString(path, root)
+	if err != nil {
+		return err
+	}
+
+	if final == "-" {
+		return jpatcherror.New("Invalid Operation", jpatcherror.ErrorInvalidOperation, "cannot "+op+" array index of '-'", nil)
+	}
+
+	return nil
+}
+
+// traceObjectPathString looks at a path string and makes sure it is valid according the root segment provided
+func traceObjectPathString(path string, root *PathSegment) (string, error) {
+	// get rid of the leading ""
+	split := strings.Split(path, "/")[1:]
+	splitLength := len(split)
+
+	currentSegment := root
+	finalPath := ""
 
 	for i, pathSeg := range split {
-		val, nextSeg, err := processSegment(currentSegment, pathSeg)
+		pathValue, nextSeg, err := processSegment(currentSegment, pathSeg)
 		if err != nil {
 			return "", err
 		}
-		translatedPath = appendToPath(translatedPath, val)
 
-		if val == "-" && nextSeg != nil {
-			return "", apierr.New("Invalid Path", ErrorInvalidPath, nil, "'-' must be final path segment")
+		if pathValue == "-" && nextSeg != nil {
+			return "", jpatcherror.New("Invalid Path", jpatcherror.ErrorInvalidPath, `'-' must be final path segment`, nil)
 		}
 
 		if nextSeg != nil && i == splitLength-1 && nextSeg.Optional == false {
-			return "", apierr.New("Invalid Path", ErrorInvalidPath, nil, "required path segment missing")
+			return "", jpatcherror.New("Invalid Path", jpatcherror.ErrorInvalidPath, "required path segment missing", nil)
 		}
 
 		if nextSeg == nil && i < splitLength-1 {
-			return "", apierr.New("Invalid path", ErrorInvalidPath, nil, "path reaches undefined segment: "+p.Path)
+			return "", jpatcherror.New("Invalid path", jpatcherror.ErrorInvalidPath, "path reaches undefined segment: "+path, nil)
 		}
 
 		currentSegment = nextSeg
-		finalSeg = val
+		finalPath = pathValue
 	}
 
-	//Check that the last segment is not "add" and an array index
-	if _, e := strconv.Atoi(finalSeg); e == nil && p.Op == Add {
-		return "", apierr.New("Unsupported Path", ErrorInvalidPath, nil, "only replace and delete supported for array index. Use '-' to append value to array")
-	}
-
-	// Check that it is not removing "-"
-	if finalSeg == "-" && p.Op == Remove {
-		return "", apierr.New("Invalid Operation", ErrorInvalidOperation, nil, "cannot remove array index of '-'")
-	}
-
-	return translatedPath, nil
+	return finalPath, nil
 }
 
-func processSegment(seg *PathSegment, path string) (string, *PathSegment, apierr.Error) {
+func processSegment(seg *PathSegment, path string) (string, *PathSegment, error) {
 	var nextSeg *PathSegment
 	var val string
 	if seg.Wildcard {
@@ -170,7 +174,7 @@ func processSegment(seg *PathSegment, path string) (string, *PathSegment, apierr
 	} else {
 		st, ok := seg.Values[path]
 		if !ok {
-			return "", nil, apierr.New("Invalid path", ErrorInvalidSegment, nil, "unknown segement: "+path)
+			return "", nil, jpatcherror.New("Invalid path", jpatcherror.ErrorInvalidSegment, "unknown segement: "+path, nil)
 		}
 		val = st
 	}
@@ -182,13 +186,6 @@ func processSegment(seg *PathSegment, path string) (string, *PathSegment, apierr
 	return val, nextSeg, nil
 }
 
-func appendToPath(current string, val string) string {
-	if current == "" {
-		return val
-	}
-	return current + "." + val
-}
-
 func requiredFurtherSegements(c map[string]*PathSegment) bool {
 	for _, seg := range c {
 		if !seg.Optional {
@@ -198,46 +195,40 @@ func requiredFurtherSegements(c map[string]*PathSegment) bool {
 	return false
 }
 
-// ValidatePatch makes sure the data provided in the patches is clean
-// This does not necessarily mean it is valid based on what model it is attempting to patch
-// This routine does NOT validate the value: that is the responsibility of model that implements
-// the Patchable interface
-func ValidatePatches(patches []Patch) apierr.Error {
-	v := validator.New()
+func validatePatch(p Patch) error {
 
-	errs := make(map[string]apierr.Error)
+	if !validOperation(p.Op) {
+		return jpatcherror.New("Invalid operation", jpatcherror.ErrorInvalidOperation, fmt.Sprintf("supported operations are: %v, %v, %v, %v, %v and %v", Add, Remove, Replace, Copy, Move, Test), p)
+	}
 
-	for i, p := range patches {
-		v.Validate(validator.NewRequest("op", p.Op, &validator.StringValue{Valid: []string{Add, Remove, Replace}, ErrorCode: ErrorInvalidOperation}))
-		v.Validate(validator.NewRequest("path", p.Path, &validator.NotEmpty{Max: util.ConvertInt(50), Regex: util.ConvertString("^\\/.*$")}))
+	split := strings.Split(p.Path, "/")
+	splitLength := len(split)
+	if splitLength < 2 || (split[0] == "" && split[1] == "") {
+		return jpatcherror.New("Empty Paths Not Supported", jpatcherror.ErrorInvalidPath, "", p)
+	}
 
-		if !v.IsValid() {
-			errs["patch "+strconv.Itoa(i)] = v.Errors()
+	if p.Op == Copy || p.Op == Move {
+		split = strings.Split(p.From, "/")
+		splitLength = len(split)
+		if splitLength < 2 || (split[0] == "" && split[1] == "") {
+			return jpatcherror.New("From path required", jpatcherror.ErrorInvalidPath, "copy and move operations require from", p)
 		}
 	}
 
-	if len(errs) != 0 {
-		return apierr.New("Invalid patches", validator.ErrorValidation, nil, errs)
+	if p.Op == Add || p.Op == Replace || p.Op == Test {
+		if p.Value == nil {
+			return jpatcherror.New("Value required", jpatcherror.ErrorInvalidValue, "value required for "+p.Op, p)
+		}
 	}
 
 	return nil
 }
 
-func ValidArrayIndex(in interface{}) bool {
-	_, ok := in.(int)
-	if ok {
-		return true
-	}
-
-	st, ok := in.(string)
-	if ok {
-		if st == "-" {
-			return true
-		}
-		if _, err := strconv.Atoi(st); err == nil {
+func validOperation(op string) bool {
+	for _, o := range []string{Add, Remove, Replace, Copy, Move, Test} {
+		if op == o {
 			return true
 		}
 	}
-
 	return false
 }
