@@ -41,7 +41,7 @@ Path Segments define each step along a path within the model. There are 4 parts:
 
 4. Children
 
-  This is the map of all possible children under the current path and maps to Values AFTER the value substitution.
+  This is the map of all possible children under the current path and is the same as the Values key.
 
   For wildcard values, use *
 
