@@ -14,7 +14,7 @@ func (e baseError) Message() string {
 }
 
 func (e baseError) Code() string {
-	return e.details
+	return e.code
 }
 
 func (e baseError) Origin() interface{} {
