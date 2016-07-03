@@ -34,6 +34,19 @@ type Patch struct {
 	From string `json:"from,omitempty"`
 }
 
+func (p Patch) Shift() Patch {
+	nPatch := Patch{Op: p.Op, Value: p.Value}
+
+	split := strings.Split(p.Path, "/")[1:]
+	nPatch.Path = "/" + strings.Join(split[1:], "/")
+	if p.From != "" {
+		split = strings.Split(p.From, "/")[1:]
+		nPatch.From = "/" + strings.Join(split[1:], "/")
+	}
+
+	return nPatch
+}
+
 // PathSegment defines an appropriate object path segment
 // PathSegments are a way for an object to tell jpatch what constitutes a valid path within the object.
 // Each segment must contain all the possible branches which can be followed from it
@@ -52,12 +65,17 @@ type PathSegment struct {
 	// 2. it can be used to map the json object property name to a different name in the system.
 	// for example, if the path was userName, but the database field was user_name, you can make that adjustment here:
 	// map[string]string{"userName":"user_name"}
-	Values map[string]string
+	Values map[string]*PathValue
 	// Children are the possible paths beneath the current path, based on the Value
 	// The key is the the json path attribute, and the returned path segment describes the next
 	// level in the path/hierarchy.
 	// For Wildcard paths, use "*"
 	Children map[string]*PathSegment
+}
+
+type PathValue struct {
+	Name         string
+	SupportedOps []string
 }
 
 // Patchable is the interface that must be implemented to translate the Patch operations
@@ -84,16 +102,18 @@ func ProcessPatches(patches []Patch, pable Patchable) ([]Patch, []error) {
 			continue
 		}
 
-		err = validatePath(p.Path, p.Op, rootSegment)
+		finalPath, err := validatePath(p.Path, p.Op, rootSegment)
 		if err != nil {
 			errs = append(errs, err)
 		}
+		p.Path = finalPath
 
 		if p.From != "" {
-			err = validateFrom(p.From, p.Op, rootSegment)
+			finalPath, err = validateFrom(p.From, p.Op, rootSegment)
 			if err != nil {
 				errs = append(errs, err)
 			}
+			p.From = finalPath
 		}
 	}
 
@@ -104,79 +124,88 @@ func ProcessPatches(patches []Patch, pable Patchable) ([]Patch, []error) {
 	return pable.ValidateJPatchPatches(patches)
 }
 
-func validatePath(path, op string, root *PathSegment) error {
-	final, err := traceObjectPathString(path, root)
+func validatePath(path, op string, root *PathSegment) (string, error) {
+	finalPath, lastVal, err := traceObjectPathString(path, op, root)
 	if err != nil {
-		return err
+		return finalPath, err
 	}
 
 	// Check for valid operations on "-"
-	if final == "-" && (op == Remove || op == Test || op == Replace) {
-		return jpatcherror.New("Invalid Operation", jpatcherror.ErrorInvalidOperation, "cannot "+op+" array index of '-'", nil)
+	if lastVal.Name == "-" && (op == Remove || op == Test || op == Replace) {
+		return "", jpatcherror.New("Invalid Operation", jpatcherror.ErrorInvalidOperation, "cannot "+op+" array index of '-'", nil)
 	}
 
-	return nil
+	if !allowedOperation(op, lastVal.SupportedOps) {
+		return "", jpatcherror.New("Invalid operation", jpatcherror.ErrorInvalidOperation, fmt.Sprintf("supported operations are: %v", lastVal.SupportedOps), nil)
+	}
+
+	return finalPath, nil
 }
 
-func validateFrom(path, op string, root *PathSegment) error {
-	final, err := traceObjectPathString(path, root)
+func validateFrom(path, op string, root *PathSegment) (string, error) {
+	finalPath, _, err := traceObjectPathString(path, op, root)
 	if err != nil {
-		return err
+		return finalPath, err
 	}
 
-	if final == "-" {
-		return jpatcherror.New("Invalid Operation", jpatcherror.ErrorInvalidOperation, "cannot "+op+" array index of '-'", nil)
+	if finalPath == "-" {
+		return "", jpatcherror.New("Invalid Operation", jpatcherror.ErrorInvalidOperation, "cannot "+op+" array index of '-'", nil)
 	}
 
-	return nil
+	return finalPath, nil
 }
 
 // traceObjectPathString looks at a path string and makes sure it is valid according the root segment provided
-func traceObjectPathString(path string, root *PathSegment) (string, error) {
+func traceObjectPathString(path string, op string, root *PathSegment) (string, *PathValue, error) {
 	// get rid of the leading ""
 	split := strings.Split(path, "/")[1:]
 	splitLength := len(split)
 
 	currentSegment := root
 	finalPath := ""
+	var lastPath *PathValue
 
 	for i, pathSeg := range split {
 		pathValue, nextSeg, err := processSegment(currentSegment, pathSeg)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 
-		if pathValue == "-" && nextSeg != nil {
-			return "", jpatcherror.New("Invalid Path", jpatcherror.ErrorInvalidPath, `'-' must be final path segment`, nil)
+		if pathValue.Name == "-" && i < splitLength-1 {
+			return "", nil, jpatcherror.New("Invalid Path", jpatcherror.ErrorInvalidPath, `'-' must be final path segment`, nil)
 		}
 
 		if nextSeg != nil && i == splitLength-1 && nextSeg.Optional == false {
-			return "", jpatcherror.New("Invalid Path", jpatcherror.ErrorInvalidPath, "required path segment missing", nil)
+			return "", nil, jpatcherror.New("Invalid Path", jpatcherror.ErrorInvalidPath, "required path segment missing", nil)
 		}
 
 		if nextSeg == nil && i < splitLength-1 {
-			return "", jpatcherror.New("Invalid path", jpatcherror.ErrorInvalidPath, "path reaches undefined segment: "+path, nil)
+			return "", nil, jpatcherror.New("Invalid path", jpatcherror.ErrorInvalidPath, "path reaches undefined segment: "+path, nil)
 		}
 
 		currentSegment = nextSeg
-		finalPath = pathValue
+		if pathValue.Name != "-" {
+			lastPath = pathValue
+		}
+
+		finalPath += "/" + pathValue.Name
 	}
 
-	return finalPath, nil
+	return finalPath, lastPath, nil
 }
 
-func processSegment(seg *PathSegment, path string) (string, *PathSegment, error) {
+func processSegment(seg *PathSegment, path string) (*PathValue, *PathSegment, error) {
 	var nextSeg *PathSegment
-	var val string
+	val := &PathValue{}
 	if seg.Wildcard {
-		val = path
+		val.Name = path
 		path = "*"
 	} else {
-		st, ok := seg.Values[path]
+		pv, ok := seg.Values[path]
 		if !ok {
-			return "", nil, jpatcherror.New("Invalid path", jpatcherror.ErrorInvalidSegment, "unknown segement: "+path, nil)
+			return nil, nil, jpatcherror.New("Invalid path", jpatcherror.ErrorInvalidSegment, "unknown segement: "+path, nil)
 		}
-		val = st
+		val = pv
 	}
 
 	if seg.Children != nil && seg.Children[path] != nil {
@@ -226,6 +255,15 @@ func validatePatch(p Patch) error {
 
 func validOperation(op string) bool {
 	for _, o := range []string{Add, Remove, Replace, Copy, Move, Test} {
+		if op == o {
+			return true
+		}
+	}
+	return false
+}
+
+func allowedOperation(op string, ops []string) bool {
+	for _, o := range ops {
 		if op == o {
 			return true
 		}

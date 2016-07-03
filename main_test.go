@@ -7,20 +7,60 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestShift(t *testing.T) {
+	assert := assert.New(t)
+
+	p := Patch{
+		Op:    Add,
+		Value: 1234,
+		Path:  "/l1/l2/l3",
+		From:  ""}
+
+	assert.Equal(Patch{
+		Op:    Add,
+		Value: 1234,
+		Path:  "/l2/l3",
+		From:  ""}, p.Shift())
+
+	p.From = "/l1/l3"
+	assert.Equal(Patch{
+		Op:    Add,
+		Value: 1234,
+		Path:  "/l2/l3",
+		From:  "/l3"}, p.Shift())
+
+	p.From = "/l3"
+	assert.Equal(Patch{
+		Op:    Add,
+		Value: 1234,
+		Path:  "/l2/l3",
+		From:  "/"}, p.Shift())
+}
+
 func TestTraceObjectPathString(t *testing.T) {
 	assert := assert.New(t)
 
 	bar := &PathSegment{
 		Optional: false,
 		Wildcard: false,
-		Values:   map[string]string{"bar": "bar"}}
+		Values:   map[string]*PathValue{"bar": &PathValue{Name: "bar"}}}
+
+	barOp := &PathSegment{
+		Optional: true,
+		Wildcard: false,
+		Values:   map[string]*PathValue{"bar": &PathValue{Name: "bar"}}}
 
 	foo := &PathSegment{
 		Optional: false,
 		Wildcard: false,
-		Values:   map[string]string{"foo": "foo", "wild": "wild"},
+		Values:   map[string]*PathValue{"foo": &PathValue{Name: "foo"}, "wild": &PathValue{Name: "wild"}, "wild2": &PathValue{Name: "wild2"}},
 		Children: map[string]*PathSegment{
 			"foo": bar,
+			"wild2": &PathSegment{
+				Optional: true,
+				Wildcard: true,
+				Children: map[string]*PathSegment{
+					"*": barOp}},
 			"wild": &PathSegment{
 				Optional: true,
 				Wildcard: true,
@@ -30,44 +70,55 @@ func TestTraceObjectPathString(t *testing.T) {
 	root := &PathSegment{
 		Optional: false,
 		Wildcard: false,
-		Values:   map[string]string{"rFoo": "foo", "rBar": "bar"},
+		Values:   map[string]*PathValue{"rFoo": &PathValue{Name: "foo"}, "rBar": &PathValue{Name: "bar"}},
 		Children: map[string]*PathSegment{
 			"rFoo": foo,
 			"rBar": bar}}
 
-	path, err := traceObjectPathString("/invalid", root)
+	path, lastVal, err := traceObjectPathString("/invalid", Add, root)
 	assert.Empty(path)
 	if assert.NotNil(err) {
 		jerr := err.(jpatcherror.Error)
 		assert.Equal(jpatcherror.ErrorInvalidSegment, jerr.Code())
 	}
 
-	path, err = traceObjectPathString("/rFoo/foo", root)
+	path, lastVal, err = traceObjectPathString("/rFoo/foo", Add, root)
 	assert.Empty(path)
 	if assert.NotNil(err) {
 		jerr := err.(jpatcherror.Error)
 		assert.Equal("required path segment missing", jerr.Details())
 	}
 
-	path, err = traceObjectPathString("/rFoo/foo/bar/baz", root)
+	path, lastVal, err = traceObjectPathString("/rFoo/foo/bar/baz", Add, root)
 	if assert.NotNil(err) {
 		jerr := err.(jpatcherror.Error)
 		assert.Equal("path reaches undefined segment: /rFoo/foo/bar/baz", jerr.Details())
 	}
 
-	path, err = traceObjectPathString("/rFoo/wild/-/bar", root)
+	path, lastVal, err = traceObjectPathString("/rFoo/wild/-/bar", Add, root)
 	if assert.NotNil(err) {
 		jerr := err.(jpatcherror.Error)
 		assert.Equal(`'-' must be final path segment`, jerr.Details())
 	}
 
-	path, err = traceObjectPathString("/rFoo/foo/bar", root)
+	path, lastVal, err = traceObjectPathString("/rFoo/foo/bar", Add, root)
 	assert.Nil(err)
-	assert.Equal("bar", path)
+	assert.Equal("/foo/foo/bar", path)
 
-	path, err = traceObjectPathString("/rFoo/wild/1/bar", root)
+	path, lastVal, err = traceObjectPathString("/rFoo/wild/1/bar", Add, root)
 	assert.Nil(err)
-	assert.Equal("bar", path)
+	assert.Equal("/foo/wild/1/bar", path)
+
+	path, lastVal, err = traceObjectPathString("/rFoo/wild2/-", Add, root)
+	assert.Nil(err)
+	assert.Equal("/foo/wild2/-", path)
+	assert.Equal("wild2", lastVal.Name)
+
+	path, lastVal, err = traceObjectPathString("/rFoo/wild2/1/baz", Add, root)
+	assert.NotNil(err)
+
+	path, lastVal, err = traceObjectPathString("/rFoo/wild2/1/bar", Add, root)
+	assert.Nil(err)
 }
 
 func TestProcessSegment(t *testing.T) {
@@ -77,20 +128,20 @@ func TestProcessSegment(t *testing.T) {
 		Optional: false,
 		Wildcard: true,
 		Children: map[string]*PathSegment{
-			"*": &PathSegment{Optional: false, Wildcard: false, Values: map[string]string{"asdf": "asdf"}}}}
+			"*": &PathSegment{Optional: false, Wildcard: false, Values: map[string]*PathValue{"asdf": &PathValue{Name: "asdf"}}}}}
 
 	val, next, err := processSegment(seg, "1")
 	assert.Nil(err)
-	assert.Equal("1", val)
-	assert.Equal(&PathSegment{Optional: false, Wildcard: false, Values: map[string]string{"asdf": "asdf"}}, next)
+	assert.Equal("1", val.Name)
+	assert.Equal(&PathSegment{Optional: false, Wildcard: false, Values: map[string]*PathValue{"asdf": &PathValue{Name: "asdf"}}}, next)
 
 	seg.Wildcard = false
-	seg.Values = map[string]string{"asdf": "jkl;"}
+	seg.Values = map[string]*PathValue{"asdf": &PathValue{Name: "jkl;"}}
 
 	val, next, err = processSegment(seg, "asdf")
 	assert.Nil(err)
 	assert.Nil(next)
-	assert.Equal("jkl;", val)
+	assert.Equal("jkl;", val.Name)
 
 	val, next, err = processSegment(seg, "path")
 	assert.Nil(next)
@@ -99,6 +150,22 @@ func TestProcessSegment(t *testing.T) {
 		jerr := err.(jpatcherror.Error)
 		assert.Equal(jpatcherror.ErrorInvalidSegment, jerr.Code())
 	}
+}
+
+func TestValidatePath(t *testing.T) {
+	assert := assert.New(t)
+	bar := &PathSegment{
+		Optional: false,
+		Wildcard: false,
+		Values:   map[string]*PathValue{"bar": &PathValue{Name: "bar", SupportedOps: []string{Add, Remove}}, "baz": &PathValue{Name: "baz", SupportedOps: []string{Copy, Remove}}}}
+
+	path, err := validatePath("/bar", Test, bar)
+	assert.NotNil(err)
+	assert.Empty(path)
+
+	path, err = validatePath("/baz", Copy, bar)
+	assert.Nil(err)
+	assert.Equal("/baz", path)
 }
 
 func TestValidatePatch(t *testing.T) {
