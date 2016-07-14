@@ -35,17 +35,19 @@ Path Segments define each step along a path within the model. There are 4 parts:
 
 3. Values
 
-  This map does two things. First, it is used to specify all the possible valid values for this segment (e.g. if an object has properties foo, bar, and baz, the values map will have 3 items: foo, bar, and baz).
+  This map does three things. First, it is used to specify all the possible valid values for this segment (e.g. if an object has properties foo, bar, and baz, the values map will have 3 items: foo, bar, and baz). Wildcard values are specified using *
 
-  Second, it provides a way to substitute value names if they are stored differently. Example: if your API exposes a JSON object with a property of fooBar, but stores that internally in the DB as foo_bar, this can be mapped by the following entry: map[string]string{"fooBar": "foo_bar"}. When someone sends a patch for /fooBar, after processing the path will be /foo_bar
+  Second, it provides a way to substitute value names if they are different in the DB from the JSON. Example: if your API exposes a JSON object with a property of fooBar, but stores that internally in the DB as foo_bar, the `Name` in `PathValue` should be foo_bar. When someone sends a patch for /fooBar, after processing the path will be /foo_bar
+
+  Finally, this provides a way for specifying which operations are valid on this value. If you have certain values that cannot be removed, specifying `Replace` in the `SupportedOps` slice will reject all patches that attempt to add or remove values. This is a way reject early patches that are invalid, before they get to the model's validation routine.
 
 4. Children
 
-  This is the map of all possible children under the current path and is the same as the Values key.
+  This is the map of all possible children under the current path. The key is the same as the Values key.
 
   For wildcard values, use *
 
-  Example: foo contains another object baz, with it's own properties. The children entry under "baz" would contain a PathSegment that defines how it can be patched. If this child segment is not optional, then any patch that stops short of this segment fail.
+  Example: foo contains another object baz, with it's own properties. The children entry under "baz" would contain a PathSegment that defines how it can be patched. If this child segment is not optional, then any patch that stops short of this segment will fail.
 
   This is useful for encapsulating patch logic. If you have an object that contains other objects, you can simply call GetJPatchRootSegment on the child object and provide that segment here.
 

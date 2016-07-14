@@ -2,6 +2,7 @@ package jpatch
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/sethjback/jpatch/jpatcherror"
@@ -34,6 +35,7 @@ type Patch struct {
 	From string `json:"from,omitempty"`
 }
 
+// Shift adjusts the path segement. Useful for handing the patch off to a child object for processing
 func (p Patch) Shift() Patch {
 	nPatch := Patch{Op: p.Op, Value: p.Value}
 
@@ -45,6 +47,32 @@ func (p Patch) Shift() Patch {
 	}
 
 	return nPatch
+}
+
+// Segments returns a slice of the path segments
+func (p Patch) Segments() []string {
+	return strings.Split(p.Path, "/")[1:]
+}
+
+// ArrayIndex returns the index int if the final segement of a path is an index
+func (p Patch) ArrayIndex(which string) (int, bool) {
+	var split []string
+	switch which {
+	case "path":
+		split = strings.Split(p.Path, "/")[1:]
+	case "from":
+		split = strings.Split(p.From, "/")[1:]
+	default:
+		return -1, false
+	}
+
+	if i, err := strconv.Atoi(split[len(split)-1]); err == nil {
+		if i < 0 {
+			return -1, false
+		}
+		return i, true
+	}
+	return -1, false
 }
 
 // PathSegment defines an appropriate object path segment
@@ -73,6 +101,9 @@ type PathSegment struct {
 	Children map[string]*PathSegment
 }
 
+// PathValue defines an appropriate value for the segment, and what operaitons are permitted on that segment
+// SupportedOps is only evaluated when the path is wanting to act on the value itself, i.e. if the path extends to
+// children then the child's value and supported ops are used
 type PathValue struct {
 	Name         string
 	SupportedOps []string
@@ -95,7 +126,9 @@ func ProcessPatches(patches []Patch, pable Patchable) ([]Patch, []error) {
 	var errs []error
 	rootSegment := pable.GetJPatchRootSegment()
 
-	for _, p := range patches {
+	vPatches := make([]Patch, len(patches))
+
+	for i, p := range patches {
 		err := validatePatch(p)
 		if err != nil {
 			errs = append(errs, err)
@@ -115,13 +148,14 @@ func ProcessPatches(patches []Patch, pable Patchable) ([]Patch, []error) {
 			}
 			p.From = finalPath
 		}
+		vPatches[i] = p
 	}
 
 	if len(errs) != 0 {
 		return nil, errs
 	}
 
-	return pable.ValidateJPatchPatches(patches)
+	return pable.ValidateJPatchPatches(vPatches)
 }
 
 func validatePath(path, op string, root *PathSegment) (string, error) {
@@ -184,9 +218,7 @@ func traceObjectPathString(path string, op string, root *PathSegment) (string, *
 		}
 
 		currentSegment = nextSeg
-		if pathValue.Name != "-" {
-			lastPath = pathValue
-		}
+		lastPath = pathValue
 
 		finalPath += "/" + pathValue.Name
 	}
@@ -199,6 +231,9 @@ func processSegment(seg *PathSegment, path string) (*PathValue, *PathSegment, er
 	val := &PathValue{}
 	if seg.Wildcard {
 		val.Name = path
+		if seg.Values["*"] != nil {
+			val.SupportedOps = seg.Values["*"].SupportedOps
+		}
 		path = "*"
 	} else {
 		pv, ok := seg.Values[path]
@@ -230,16 +265,16 @@ func validatePatch(p Patch) error {
 		return jpatcherror.New("Invalid operation", jpatcherror.ErrorInvalidOperation, fmt.Sprintf("supported operations are: %v, %v, %v, %v, %v and %v", Add, Remove, Replace, Copy, Move, Test), p)
 	}
 
-	split := strings.Split(p.Path, "/")
+	split := strings.Split(p.Path, "/")[1:]
 	splitLength := len(split)
-	if splitLength < 2 || (split[0] == "" && split[1] == "") {
-		return jpatcherror.New("Empty Paths Not Supported", jpatcherror.ErrorInvalidPath, "", p)
+	if splitLength == 0 || (splitLength == 1 && split[0] == "") {
+		return jpatcherror.New("Empty Paths Not Supported", jpatcherror.ErrorInvalidPath, "paths must begin with /", p)
 	}
 
 	if p.Op == Copy || p.Op == Move {
-		split = strings.Split(p.From, "/")
+		split = strings.Split(p.From, "/")[1:]
 		splitLength = len(split)
-		if splitLength < 2 || (split[0] == "" && split[1] == "") {
+		if splitLength == 0 || (splitLength == 1 && split[0] == "") {
 			return jpatcherror.New("From path required", jpatcherror.ErrorInvalidPath, "copy and move operations require from", p)
 		}
 	}
