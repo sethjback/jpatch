@@ -112,7 +112,7 @@ func TestTraceObjectPathString(t *testing.T) {
 	path, lastVal, err = traceObjectPathString("/rFoo/wild2/-", Add, root)
 	assert.Nil(err)
 	assert.Equal("/foo/wild2/-", path)
-	assert.Equal("wild2", lastVal.Name)
+	assert.Equal("-", lastVal.Name)
 
 	path, lastVal, err = traceObjectPathString("/rFoo/wild2/1/baz", Add, root)
 	assert.NotNil(err)
@@ -187,6 +187,14 @@ func TestValidatePatch(t *testing.T) {
 		assert.Equal("Empty Paths Not Supported", jerr.Message())
 	}
 
+	p.Path = "/"
+	err = validatePatch(p)
+	if assert.NotNil(err) {
+		jerr := err.(jpatcherror.Error)
+		assert.Equal(jpatcherror.ErrorInvalidPath, jerr.Code())
+		assert.Equal("Empty Paths Not Supported", jerr.Message())
+	}
+
 	p.Path = "/foo/bar"
 	p.Op = Move
 	err = validatePatch(p)
@@ -203,4 +211,19 @@ func TestValidatePatch(t *testing.T) {
 		assert.Equal(jpatcherror.ErrorInvalidValue, jerr.Code())
 		assert.Equal("Value required", jerr.Message())
 	}
+}
+
+func TestPatchArrayIndex(t *testing.T) {
+	assert := assert.New(t)
+
+	p := Patch{Path: "/sadf/asdf/1"}
+	i, ok := p.ArrayIndex("path")
+	assert.True(ok)
+	assert.Equal(1, i)
+
+	p.Path = "/asdf/-"
+	i, ok = p.ArrayIndex("path")
+	assert.False(ok)
+	assert.Equal(-1, i)
+
 }
