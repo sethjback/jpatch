@@ -126,9 +126,12 @@ func ProcessPatches(patches []Patch, pable Patchable) ([]Patch, []error) {
 	var errs []error
 	rootSegment := pable.GetJPatchRootSegment()
 
-	vPatches := make([]Patch, len(patches))
+	vAdd := make([]Patch, 0)
+	vRemove := make([]Patch, 0)
+	vMove := make([]Patch, 0)
+	vReplace := make([]Patch, 0)
 
-	for i, p := range patches {
+	for _, p := range patches {
 		err := validatePatch(p)
 		if err != nil {
 			errs = append(errs, err)
@@ -148,8 +151,22 @@ func ProcessPatches(patches []Patch, pable Patchable) ([]Patch, []error) {
 			}
 			p.From = finalPath
 		}
-		vPatches[i] = p
+		switch p.Op {
+		case Add:
+			vAdd = append(vAdd, p)
+		case Move:
+			vMove = append(vMove, p)
+		case Remove:
+			vRemove = append(vRemove, p)
+		case Replace:
+			vReplace = append(vReplace, p)
+		}
 	}
+
+	vPatches := vRemove
+	vPatches = append(vPatches, vReplace...)
+	vPatches = append(vPatches, vMove...)
+	vPatches = append(vPatches, vAdd...)
 
 	if len(errs) != 0 {
 		return nil, errs
