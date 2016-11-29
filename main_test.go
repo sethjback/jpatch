@@ -7,36 +7,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestShift(t *testing.T) {
-	assert := assert.New(t)
-
-	p := Patch{
-		Op:    Add,
-		Value: 1234,
-		Path:  "/l1/l2/l3",
-		From:  ""}
-
-	assert.Equal(Patch{
-		Op:    Add,
-		Value: 1234,
-		Path:  "/l2/l3",
-		From:  ""}, p.Shift())
-
-	p.From = "/l1/l3"
-	assert.Equal(Patch{
-		Op:    Add,
-		Value: 1234,
-		Path:  "/l2/l3",
-		From:  "/l3"}, p.Shift())
-
-	p.From = "/l3"
-	assert.Equal(Patch{
-		Op:    Add,
-		Value: 1234,
-		Path:  "/l2/l3",
-		From:  "/"}, p.Shift())
-}
-
 func TestTraceObjectPathString(t *testing.T) {
 	assert := assert.New(t)
 
@@ -211,19 +181,4 @@ func TestValidatePatch(t *testing.T) {
 		assert.Equal(jpatcherror.ErrorInvalidValue, jerr.Code())
 		assert.Equal("Value required", jerr.Message())
 	}
-}
-
-func TestPatchArrayIndex(t *testing.T) {
-	assert := assert.New(t)
-
-	p := Patch{Path: "/sadf/asdf/1"}
-	i, ok := p.ArrayIndex("path")
-	assert.True(ok)
-	assert.Equal(1, i)
-
-	p.Path = "/asdf/-"
-	i, ok = p.ArrayIndex("path")
-	assert.False(ok)
-	assert.Equal(-1, i)
-
 }

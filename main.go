@@ -2,7 +2,6 @@ package jpatch
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/sethjback/jpatch/jpatcherror"
@@ -33,46 +32,6 @@ type Patch struct {
 	Value interface{} `json:"value,omitempty"`
 	// From is the path to move or copy
 	From string `json:"from,omitempty"`
-}
-
-// Shift adjusts the path segement. Useful for handing the patch off to a child object for processing
-func (p Patch) Shift() Patch {
-	nPatch := Patch{Op: p.Op, Value: p.Value}
-
-	split := strings.Split(p.Path, "/")[1:]
-	nPatch.Path = "/" + strings.Join(split[1:], "/")
-	if p.From != "" {
-		split = strings.Split(p.From, "/")[1:]
-		nPatch.From = "/" + strings.Join(split[1:], "/")
-	}
-
-	return nPatch
-}
-
-// Segments returns a slice of the path segments
-func (p Patch) Segments() []string {
-	return strings.Split(p.Path, "/")[1:]
-}
-
-// ArrayIndex returns the index int if the final segement of a path is an index
-func (p Patch) ArrayIndex(which string) (int, bool) {
-	var split []string
-	switch which {
-	case "path":
-		split = strings.Split(p.Path, "/")[1:]
-	case "from":
-		split = strings.Split(p.From, "/")[1:]
-	default:
-		return -1, false
-	}
-
-	if i, err := strconv.Atoi(split[len(split)-1]); err == nil {
-		if i < 0 {
-			return -1, false
-		}
-		return i, true
-	}
-	return -1, false
 }
 
 // PathSegment defines an appropriate object path segment
@@ -115,16 +74,34 @@ type PathValue struct {
 type Patchable interface {
 	// GetJPatchRootSegment returns the root path segment definition
 	// All potential patch operations are validatd against this definition
-	GetJPatchRootSegment() *PathSegment
-	// TranslateValue gives Patchable a chance to validate and modify the value in any way before passing it to the datastore
-	ValidateJPatchPatches([]Patch) ([]Patch, []error)
+	GetRootSegment() *PathSegment
+	// ValidatePatches gives the object a chance to validate and modify the patch values in any way before passing them to the datastore
+	ValidatePatches([]Patch) ([]Patch, []error)
+	// ApplyPatches expects the object to actually apply the patches
+	ApplyPatches([]Patch) []error
 }
 
 // ProcessPatches process patch objects
 func ProcessPatches(patches []Patch, pable Patchable) ([]Patch, []error) {
+	ps, errs := validateSortPataches(patches, pable.GetRootSegment())
+	if errs != nil {
+		return nil, errs
+	}
 
+	return pable.ValidatePatches(ps)
+}
+
+func PatchObject(patches []Patch, pable Patchable) []error {
+	ps, errs := validateSortPataches(patches, pable.GetRootSegment())
+	if errs != nil {
+		return errs
+	}
+
+	return pable.ApplyPatches(ps)
+}
+
+func validateSortPataches(patches []Patch, rootSegment *PathSegment) ([]Patch, []error) {
 	var errs []error
-	rootSegment := pable.GetJPatchRootSegment()
 
 	vAdd := make([]Patch, 0)
 	vRemove := make([]Patch, 0)
@@ -168,11 +145,7 @@ func ProcessPatches(patches []Patch, pable Patchable) ([]Patch, []error) {
 	vPatches = append(vPatches, vMove...)
 	vPatches = append(vPatches, vAdd...)
 
-	if len(errs) != 0 {
-		return nil, errs
-	}
-
-	return pable.ValidateJPatchPatches(vPatches)
+	return vPatches, errs
 }
 
 func validatePath(path, op string, root *PathSegment) (string, error) {
@@ -206,7 +179,6 @@ func validateFrom(path, op string, root *PathSegment) (string, error) {
 	return finalPath, nil
 }
 
-// traceObjectPathString looks at a path string and makes sure it is valid according the root segment provided
 func traceObjectPathString(path string, op string, root *PathSegment) (string, *PathValue, error) {
 	// get rid of the leading ""
 	split := strings.Split(path, "/")[1:]
